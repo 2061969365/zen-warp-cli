@@ -1,0 +1,117 @@
+name: warp-cli-test
+
+# 复用 2061969365/dump 中的 Cloudflare WARP 方案：
+#   - uses: fscarmen/warp-on-actions@v1.3 (mode: client, stack: dual)
+#   - Fix DNS (nameserver 1.1.1.1)
+# 6 个独立 runner 上测试官方 CLI (opencode run) 对话 deepseek-v4.1-flash-free，
+# 并测试重连换 IP 后的请求表现。
+on:
+  workflow_dispatch:
+
+jobs:
+  warp-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: pre-warp egress
+        run: |
+          curl -s -m 15 http://ip-api.com/json | python3 -c 'import json,sys; j=json.load(sys.stdin); print("RAW_RUNNER_IP=", j.get("query"), j.get("countryCode",""), j.get("as",""))' || true
+
+      - name: Setup WARP
+        uses: fscarmen/warp-on-actions@v1.3
+        with:
+          stack: dual
+          mode: client
+
+      - name: Fix DNS
+        run: |
+          sudo systemctl stop systemd-resolved 2>/dev/null || true
+          sudo systemctl disable systemd-resolved 2>/dev/null || true
+          sudo rm -f /etc/resolv.conf
+          echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 1.0.0.1" | sudo tee /etc/resolv.conf
+          echo "WARP_IPV4=$(curl -s --max-time 10 https://api.ipify.org)"
+          echo "WARP_IPV6=$(curl -s --max-time 10 https://api6.ipify.org 2>/dev/null || echo 'none')"
+          curl -s --max-time 10 https://www.cloudflare.com/cdn-cgi/trace | grep -E 'ip=|warp=|loc=|colo=' || true
+
+      - name: install official cli
+        run: |
+          set -u
+          npm install -g @opencode/cli@latest >/tmp/npm.log 2>&1 || { echo "CLI_INSTALL_FAIL"; tail -15 /tmp/npm.log; exit 0; }
+          echo "CLI_VERSION=$(opencode --version 2>&1 | head -1)"
+
+      - name: turn1 real conversation through WARP
+        env:
+          OPENCODE_DISABLE_AUTOUPDATE: "1"
+          NO_COLOR: "1"
+        run: |
+          set -u
+          set +e
+          out=$(timeout 150 opencode run -m "opencode/deepseek-v4.1-flash-free" "你好，请用一句话说明你能做什么。只回复这一句。" 2>&1)
+          rc=$?
+          clean=$(printf '%s' "$out" | sed -e 's/\x1b\[[0-9;]*[a-zA-Z]//g' -e 's/\r//g')
+          echo "T1 rc=$rc chars=${#clean}"
+          echo "T1_TAIL=$(printf '%s' "$clean" | tail -3 | tr '\n' '|' | head -c 350)"
+          printf '%s' "$clean" > /tmp/t1.txt
+          echo "T1_RC=$rc" >> $GITHUB_ENV
+
+      - name: turn2 continue session through WARP
+        env:
+          OPENCODE_DISABLE_AUTOUPDATE: "1"
+          NO_COLOR: "1"
+        run: |
+          set -u
+          set +e
+          out=$(timeout 150 opencode run --continue "请复述你上一句回答的前半句，不要展开。" 2>&1)
+          rc=$?
+          clean=$(printf '%s' "$out" | sed -e 's/\x1b\[[0-9;]*[a-zA-Z]//g' -e 's/\r//g')
+          echo "T2 rc=$rc chars=${#clean}"
+          echo "T2_TAIL=$(printf '%s' "$clean" | tail -3 | tr '\n' '|' | head -c 350)"
+          printf '%s' "$clean" > /tmp/t2.txt
+          echo "T2_RC=$rc" >> $GITHUB_ENV
+
+      - name: warp reconnect and test rotation
+        env:
+          OPENCODE_DISABLE_AUTOUPDATE: "1"
+          NO_COLOR: "1"
+        run: |
+          set +e
+          echo "=== Reconnecting WARP ==="
+          sudo warp-cli --accept-tos disconnect || true
+          sleep 3
+          sudo warp-cli --accept-tos connect || true
+          sleep 3
+          echo "NEW_WARP_IP=$(curl -s --max-time 10 https://api.ipify.org)"
+          curl -s --max-time 10 https://www.cloudflare.com/cdn-cgi/trace | grep -E 'ip=|warp=|loc=|colo=' || true
+          out=$(timeout 150 opencode run -m "opencode/deepseek-v4.1-flash-free" "请回答一个词：正常。只回复这个词。" 2>&1)
+          rc=$?
+          clean=$(printf '%s' "$out" | sed -e 's/\x1b\[[0-9;]*[a-zA-Z]//g' -e 's/\r//g')
+          echo "T3 rc=$rc chars=${#clean}"
+          echo "T3_TAIL=$(printf '%s' "$clean" | tail -3 | tr '\n' '|' | head -c 350)"
+          printf '%s' "$clean" > /tmp/t3.txt
+
+      - name: summary
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import os, re
+          def rd(p):
+              try: return open(p, encoding='utf-8', errors='replace').read().strip()
+              except: return ''
+          t1, t2, t3 = rd('/tmp/t1.txt'), rd('/tmp/t2.txt'), rd('/tmp/t3.txt')
+          def verdict(t):
+              if 'Free usage limit' in t or 'FreeUsageLimitError' in t: return '429'
+              if 'Model unavailable' in t: return 'MODEL_BAD'
+              if 'ECONNREFUSED' in t: return 'ECONNREFUSED'
+              if 'ECONNRESET' in t: return 'ECONNRESET'
+              if len(t) > 25 and not t.startswith('Error:'): return 'OK200'
+              return 'OTHER_FAIL'
+          v1, v2, v3 = verdict(t1), verdict(t2), verdict(t3)
+          print(f"### Shard ${{ matrix.shard }}")
+          print(f"- Turn1: **{v1}** | Text: `{t1[-160:]}`")
+          print(f"- Turn2: **{v2}** | Text: `{t2[-160:]}`")
+          print(f"- Turn3 (Reconnected WARP): **{v3}** | Text: `{t3[-160:]}`")
+          PY
