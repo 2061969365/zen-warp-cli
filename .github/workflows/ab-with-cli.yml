@@ -1,0 +1,85 @@
+name: ab-with-cli
+
+# 同一 runner、同一出口上三方对照：
+#   1) 官方 CLI 真实直连（基线，验证出口是否可用）
+#   2) gw-A：第一次成功的通道版本（无历史改写）
+#   3) gw-B：当前版本（含历史改写）
+# 三方各自的 45 工具 / 多轮结果，一次 run 定位 429 来源。
+on:
+  workflow_dispatch:
+
+jobs:
+  ab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: fscarmen/warp-on-actions@v1.3
+        with:
+          stack: dual
+          mode: client
+      - name: Fix DNS
+        run: |
+          sudo systemctl stop systemd-resolved 2>/dev/null || true
+          sudo rm -f /etc/resolv.conf
+          echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+          echo "WARP_EXIT=$(curl -s --max-time 10 https://api.ipify.org || echo '?')"
+
+      - name: Install official CLI
+        run: |
+          npm install -g @opencode/cli@2.2.5 >/tmp/npm.log 2>&1 || { tail -15 /tmp/npm.log; exit 1; }
+          echo "CLI=$(opencode --version 2>&1 | head -1)"
+
+      - name: Official CLI baseline (real upstream)
+        run: |
+          set +e
+          mkdir -p cli-proj
+          cd cli-proj
+          out=$(OPENCODE_DISABLE_AUTOUPDATE=1 NO_COLOR=1 timeout 180 opencode run -m opencode/deepseek-v4.1-flash-free "say ok" 2>&1)
+          rc=$?
+          echo "CLI_EXIT=$rc"
+          echo "CLI_OUT=$(echo "$out" | tail -3 | tr '\n' '|' | head -c 300)"
+          cd ..
+
+      - name: Build requests
+        run: |
+          python3 - <<'PY'
+          import json
+          names = ["pwsh","read","write","edit","glob","grep","skill","subagent",
+                   "web_search","web_fetch","team_task_create","todo_write","workflow"]
+          tools = [{"type":"function","function":{"name":n,"description":"Tool "+n+".",
+                    "parameters":{"type":"object","properties":{"query":{"type":"string"}}}}} for n in names]
+          json.dump({"model":"deepseek-v4.1-flash-free",
+                     "messages":[{"role":"user","content":"Use web_search to search opencode"}],
+                     "stream":False,"tools":tools}, open("req45.json","w"))
+          json.dump({"model":"deepseek-v4.1-flash-free",
+                     "messages":[
+                       {"role":"user","content":"Use web_search"},
+                       {"role":"assistant","content":None,"tool_calls":[
+                         {"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\":\"x\"}"}}]},
+                       {"role":"tool","tool_call_id":"call_1","content":"result"}],
+                     "stream":False,"tools":tools[:3]}, open("reqmulti.json","w"))
+          print("built")
+          PY
+
+      - name: Run gw-A and gw-B
+        run: |
+          set +e
+          echo "### RESULT" >> $GITHUB_STEP_SUMMARY
+          echo "WARP_EXIT=$(curl -s --max-time 10 https://api.ipify.org)" >> $GITHUB_STEP_SUMMARY
+          for v in A B; do
+            if [ "$v" = "A" ]; then BIN=bin/gw-A; PORT=18101; else BIN=bin/gw-B; PORT=18102; fi
+            chmod +x "$BIN"
+            PORT=$PORT DIRECT_SIDECAR=off DIRECT_UA="opencode/latest/2.2.5/cli" \
+            DIRECT_FREELIMIT_COOLDOWN=0 ZEN_TOOL_CHANNEL=1 \
+            HTTPS_PROXY="" HTTP_PROXY="" https_proxy="" http_proxy="" ALL_PROXY="" \
+            "$BIN" > gw-$v.log 2>&1 &
+            for i in $(seq 1 30); do
+              [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:$PORT/health)" = "200" ] && break
+              sleep 1
+            done
+            c1=$(curl -s -o r45-$v.json -w '%{http_code}' --max-time 120 -X POST http://127.0.0.1:$PORT/v1/chat/completions -H 'Content-Type: application/json' -H 'Authorization: Bearer public' --data-binary @req45.json)
+            c2=$(curl -s -o rmulti-$v.json -w '%{http_code}' --max-time 120 -X POST http://127.0.0.1:$PORT/v1/chat/completions -H 'Content-Type: application/json' -H 'Authorization: Bearer public' --data-binary @reqmulti.json)
+            echo "$v 45tools=$c1 multi=$c2" | tee -a $GITHUB_STEP_SUMMARY
+            echo "  $v 45 body: $(head -c 150 r45-$v.json)"
+          done
