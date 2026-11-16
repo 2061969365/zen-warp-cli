@@ -1,0 +1,98 @@
+name: channel-mode-test
+
+# 在 WARP 出口上验证 12 官方桩通道方案：
+# 45 个客户端工具 -> 12 官方通道名(_tool 选择器) -> 真实上游，
+# 检查 429 是否消失、工具调用是否被正确还原。
+on:
+  workflow_dispatch:
+
+jobs:
+  channel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: fscarmen/warp-on-actions@v1.3
+        with:
+          stack: dual
+          mode: client
+
+      - name: Fix DNS
+        run: |
+          sudo systemctl stop systemd-resolved 2>/dev/null || true
+          sudo rm -f /etc/resolv.conf
+          echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+          echo "WARP_IPV4=$(curl -s --max-time 10 https://api.ipify.org || echo '?')"
+          curl -s --max-time 10 https://www.cloudflare.com/cdn-cgi/trace | grep -E 'ip=|warp=|loc=' || true
+
+      - name: Build 45-tool request
+        run: |
+          python3 - <<'PY'
+          import json
+          names = ["pwsh","read","write","edit","glob","grep","skill","subagent",
+                   "web_search","web_fetch","team_task_create","team_task_list",
+                   "team_task_update","team_task_get","send_message","spawn_teammate",
+                   "list_agents","interrupt_agent","wait_agent","create_goal",
+                   "update_goal","todo_write","workflow","schedule_create","schedule_delete",
+                   "schedule_list","schedule_update","ask_user_question","read_image",
+                   "dsh_im_group_file","dsh_im_group_history","dsh_im_return_file",
+                   "exit_plan_mode","present","purge_apply","purge_revert","purge_status",
+                   "anysearch_search","anysearch_batch_search","anysearch_capabilities",
+                   "job_kill","job_list","job_output"]
+          tools = [{"type":"function","function":{
+              "name":n,"description":"Tool "+n+".",
+              "parameters":{"type":"object","properties":{"query":{"type":"string"}}}}} for n in names]
+          body = {"model":"deepseek-v4.1-flash-free",
+                  "messages":[{"role":"user","content":"Use the web_search tool to search for opencode, then tell me the result."}],
+                  "stream":False,"tools":tools}
+          json.dump(body, open("req.json","w"), ensure_ascii=False)
+          print("tools:", len(tools))
+          PY
+
+      - name: Start gateway in channel mode
+        run: |
+          chmod +x bin/zen-direct
+          PORT=18081 \
+          DIRECT_SIDECAR=off \
+          DIRECT_UA="opencode/latest/2.2.5/cli" \
+          DIRECT_FREELIMIT_COOLDOWN=0 \
+          ZEN_TOOL_CHANNEL=1 \
+          HTTPS_PROXY="" HTTP_PROXY="" https_proxy="" http_proxy="" ALL_PROXY="" \
+          ./bin/zen-direct > gw.log 2>&1 &
+          echo $! > gw.pid
+          for i in $(seq 1 40); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:18081/health)" = "200" ] && break
+            sleep 1
+          done
+          curl -s http://127.0.0.1:18081/health || true
+
+      - name: Run 45-tool request
+        run: |
+          set +e
+          code=$(curl -s -o resp.json -w '%{http_code}' --max-time 180 \
+            -X POST http://127.0.0.1:18081/v1/chat/completions \
+            -H 'Content-Type: application/json' -H 'Authorization: Bearer public' \
+            --data-binary @req.json)
+          echo "HTTP_CODE=$code" | tee result.txt
+          echo "--- response ---"
+          head -c 1500 resp.json
+          echo
+          python3 - <<'PY'
+          import json
+          try:
+              r = json.load(open("resp.json"))
+              calls = r.get("choices",[{}])[0].get("message",{}).get("tool_calls",[])
+              print("TOOL_CALLS=", len(calls))
+              for c in calls:
+                  fn = c.get("function",{})
+                  print("  name=", fn.get("name"), " args=", fn.get("arguments"))
+          except Exception as e:
+              print("parse error:", e)
+          PY
+
+      - name: Summary
+        if: always()
+        run: |
+          cat result.txt 2>/dev/null >> $GITHUB_STEP_SUMMARY
+          echo "### gateway log tail" >> $GITHUB_STEP_SUMMARY
+          tail -20 gw.log >> $GITHUB_STEP_SUMMARY
