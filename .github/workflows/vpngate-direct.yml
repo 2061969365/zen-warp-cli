@@ -1,0 +1,111 @@
+name: vpngate-direct
+
+# VPNGate 住宅出口实测：sing-box OpenVPN 接入 VPNGate 节点，
+# 在该出口上跑 zen-direct v0.9.27，依次测 plain / tools / multi / 45tools。
+on:
+  workflow_dispatch:
+
+jobs:
+  vg:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install sing-box
+        run: |
+          V=1.11.3
+          curl -fsSL -o /tmp/sb.tgz "https://github.com/SagerNet/sing-box/releases/download/v${V}/sing-box-${V}-linux-amd64.tar.gz"
+          tar -xzf /tmp/sb.tgz -C /tmp
+          sudo install -m755 "/tmp/sing-box-${V}-linux-amd64/sing-box" /usr/local/bin/sing-box
+          sing-box version
+
+      - name: Fix DNS
+        run: |
+          sudo systemctl stop systemd-resolved 2>/dev/null || true
+          sudo systemctl disable systemd-resolved 2>/dev/null || true
+          sudo rm -f /etc/resolv.conf
+          echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+          echo "RAW_EXIT=$(curl -s --max-time 10 https://api.ipify.org || echo '?')" | tee -a $GITHUB_STEP_SUMMARY
+
+      - name: Probe and connect VPNGate
+        run: |
+          curl -s --compressed -m 20 -o /tmp/vg.csv "https://www.vpngate.net/api/iphone/" || true
+          wc -l /tmp/vg.csv
+          python3 scripts/probe_and_select_vpngate.py --csv /tmp/vg.csv --output /tmp/sb.json --concurrency 50 --handshake-timeout 6 || true
+          ls -l /tmp/sb.json || { echo "NO_NODE"; exit 1; }
+          sudo sing-box run -c /tmp/sb.json > /tmp/sb.log 2>&1 &
+          for i in $(seq 1 30); do
+            IP=$(curl -s --max-time 8 https://api.ipify.org || echo '')
+            [ -n "$IP" ] && break
+            sleep 2
+          done
+          echo "VPN_EXIT=$IP" | tee -a $GITHUB_STEP_SUMMARY
+
+      - name: Start gateway v0.9.27
+        run: |
+          chmod +x bin/zen-direct
+          PORT=18081 DIRECT_SIDECAR=off DIRECT_UA="opencode/latest/2.2.5/cli" \
+          DIRECT_FREELIMIT_COOLDOWN=0 ZEN_TOOL_CHANNEL=1 \
+          HTTPS_PROXY="" HTTP_PROXY="" https_proxy="" http_proxy="" ALL_PROXY="" \
+          ./bin/zen-direct > gw.log 2>&1 &
+          for i in $(seq 1 30); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:18081/health)" = "200" ] && break
+            sleep 1
+          done
+          grep -o 'v0\.9\.[0-9]*' gw.log | head -1 | sed 's/^/VER=/' | tee -a $GITHUB_STEP_SUMMARY
+
+      - name: Run 4 requests
+        run: |
+          set +e
+          python3 - <<'PY'
+          import json
+          names = ["pwsh","read","write","edit","glob","grep","skill","subagent",
+                   "web_search","web_fetch","team_task_create","team_task_list",
+                   "send_message","spawn_teammate","list_agents","todo_write","workflow"]
+          tools = [{"type":"function","function":{"name":n,"description":"Tool "+n+".",
+                    "parameters":{"type":"object","properties":{"query":{"type":"string"}}}}} for n in names]
+          json.dump({"model":"deepseek-v4.1-flash-free",
+                     "messages":[{"role":"user","content":"say ok"}],"stream":False},
+                    open("plain.json","w"))
+          json.dump({"model":"deepseek-v4.1-flash-free",
+                     "messages":[{"role":"user","content":"search opencode"}],
+                     "stream":False,"tools":tools}, open("tools.json","w"))
+          json.dump({"model":"deepseek-v4.1-flash-free",
+                     "messages":[
+                       {"role":"user","content":"search opencode"},
+                       {"role":"assistant","content":None,"tool_calls":[
+                         {"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\":\"opencode\"}"}}]},
+                       {"role":"tool","tool_call_id":"call_1","content":"opencode is an AI agent"}],
+                     "stream":False,"tools":tools}, open("multi.json","w"))
+          names45 = names + ["team_task_update","team_task_get","interrupt_agent","wait_agent",
+                     "create_goal","update_goal","schedule_create","schedule_delete",
+                     "schedule_list","schedule_update","ask_user_question","read_image",
+                     "dsh_im_group_file","dsh_im_group_history","dsh_im_return_file",
+                     "exit_plan_mode","present","purge_apply","purge_revert","purge_status",
+                     "anysearch_search","anysearch_batch_search","anysearch_capabilities",
+                     "job_kill","job_list","job_output"]
+          t45=[{"type":"function","function":{"name":n,"description":"Tool "+n+".",
+                "parameters":{"type":"object","properties":{"query":{"type":"string"}}}}} for n in names45]
+          json.dump({"model":"deepseek-v4.1-flash-free",
+                     "messages":[{"role":"user","content":"Use web_search to search opencode"}],
+                     "stream":False,"tools":t45}, open("req45.json","w"))
+          print("built", len(t45))
+          PY
+          for t in plain tools multi; do
+            code=$(curl -s -o r-$t.json -w '%{http_code}' --max-time 180 \
+              -X POST http://127.0.0.1:18081/v1/chat/completions \
+              -H 'Content-Type: application/json' -H 'Authorization: Bearer public' \
+              --data-binary @$t.json)
+            echo "$t=$code" | tee -a $GITHUB_STEP_SUMMARY
+            head -c 160 r-$t.json | tr '\n' ' ' | tee -a $GITHUB_STEP_SUMMARY
+            echo | tee -a $GITHUB_STEP_SUMMARY
+            sleep 3
+          done
+          code=$(curl -s -o r-45.json -w '%{http_code}' --max-time 180 \
+            -X POST http://127.0.0.1:18081/v1/chat/completions \
+            -H 'Content-Type: application/json' -H 'Authorization: Bearer public' \
+            --data-binary @req45.json)
+          echo "45tools=$code" | tee -a $GITHUB_STEP_SUMMARY
+          head -c 200 r-45.json | tr '\n' ' ' | tee -a $GITHUB_STEP_SUMMARY
+          echo | tee -a $GITHUB_STEP_SUMMARY
