@@ -24,8 +24,8 @@ jobs:
           sudo systemctl stop systemd-resolved 2>/dev/null || true
           sudo rm -f /etc/resolv.conf
           echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8" | sudo tee /etc/resolv.conf
-          echo "### shard ${{ matrix.shard }}" >> $GITHUB_STEP_SUMMARY
-          echo "WARP_EXIT=$(curl -s --max-time 10 https://api.ipify.org || echo '?')" >> $GITHUB_STEP_SUMMARY
+          echo "### shard ${{ matrix.shard }}" | tee -a $GITHUB_STEP_SUMMARY
+          echo "WARP_EXIT=$(curl -s --max-time 10 https://api.ipify.org || echo '?')" | tee -a $GITHUB_STEP_SUMMARY
 
       - name: Build requests
         run: |
