@@ -1,0 +1,125 @@
+name: warp-matrix
+
+# 同一 WARP 出口 IP 上依次测多个网关（v0.9.27 / opencode2iori / gw-A 原始通道版），
+# matrix 跑 3 个 job 拿 3 个不同出口，得到 3 出口 x 3 网关矩阵。
+on:
+  workflow_dispatch:
+
+jobs:
+  m:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: fscarmen/warp-on-actions@v1.3
+        with:
+          stack: dual
+          mode: client
+      - name: Fix DNS
+        run: |
+          sudo systemctl stop systemd-resolved 2>/dev/null || true
+          sudo rm -f /etc/resolv.conf
+          echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+          echo "### shard ${{ matrix.shard }}" >> $GITHUB_STEP_SUMMARY
+          echo "WARP_EXIT=$(curl -s --max-time 10 https://api.ipify.org || echo '?')" >> $GITHUB_STEP_SUMMARY
+
+      - name: Build requests
+        run: |
+          python3 - <<'PY'
+          import json
+          names = ["pwsh","read","write","edit","glob","grep","skill","subagent",
+                   "web_search","web_fetch","team_task_create","todo_write","workflow"]
+          tools = [{"type":"function","function":{"name":n,"description":"Tool "+n+".",
+                    "parameters":{"type":"object","properties":{"query":{"type":"string"}}}}} for n in names]
+          json.dump({"model":"deepseek-v4.1-flash-free",
+                     "messages":[{"role":"user","content":"say ok"}],"stream":False},
+                    open("plain.json","w"))
+          json.dump({"model":"deepseek-v4.1-flash-free",
+                     "messages":[{"role":"user","content":"search opencode"}],
+                     "stream":False,"tools":tools}, open("tools.json","w"))
+          json.dump({"model":"deepseek-v4.1-flash-free",
+                     "messages":[
+                       {"role":"user","content":"search opencode"},
+                       {"role":"assistant","content":None,"tool_calls":[
+                         {"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\":\"opencode\"}"}}]},
+                       {"role":"tool","tool_call_id":"call_1","content":"opencode is an AI agent"}],
+                     "stream":False,"tools":tools}, open("multi.json","w"))
+          print("built")
+          PY
+
+      - name: Test 3 gateways on this exit
+        run: |
+          set +e
+          S="${{ matrix.shard }}"
+          # 1) zen-direct v0.9.27 通道模式
+          chmod +x bin/zen-direct
+          PORT=$((18100+S)) DIRECT_SIDECAR=off DIRECT_UA="opencode/latest/2.2.5/cli" \
+          DIRECT_FREELIMIT_COOLDOWN=0 ZEN_TOOL_CHANNEL=1 \
+          HTTPS_PROXY="" HTTP_PROXY="" https_proxy="" http_proxy="" ALL_PROXY="" \
+          ./bin/zen-direct > gw-zd.log 2>&1 &
+          ZD=$!
+          for i in $(seq 1 30); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:$((18100+S))/health)" = "200" ] && break
+            sleep 1
+          done
+          for t in plain tools multi; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 120 \
+              -X POST http://127.0.0.1:$((18100+S))/v1/chat/completions \
+              -H 'Content-Type: application/json' -H 'Authorization: Bearer public' \
+              --data-binary @$t.json)
+            echo "zen-direct $t=$code" >> $GITHUB_STEP_SUMMARY
+            sleep 2
+          done
+          kill $ZD 2>/dev/null
+          sleep 1
+          # 2) opencode2iori
+          chmod +x bin/opencode2iori
+          mkdir -p cfg
+          cat > cfg/config.json <<EOF
+          {"listen":"127.0.0.1:$((18200+S))","server_keys":["local-k"],"zen_keys":[],"go_keys":[],
+           "anonymous":true,"warp":{"enabled":false,"pool_size":2,"stack":"ipv4","source_ipv6":""},
+           "proxies":["direct"],
+           "upstream":{"zen":"https://opencode.ai/zen","go":"https://opencode.ai/zen/go","anonymous":"https://opencode.ai/inference"},
+           "retry":{"max_attempts":3,"timeout_seconds":300},
+           "models":{"refresh_seconds":300,"protocols":{},"free_only":true,"active_probes":false}}
+          EOF
+          ./bin/opencode2iori -config cfg/config.json > gw-io.log 2>&1 &
+          IO=$!
+          for i in $(seq 1 40); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:$((18200+S))/healthz)" = "200" ] && break
+            sleep 1
+          done
+          for t in plain tools multi; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 120 \
+              -X POST http://127.0.0.1:$((18200+S))/v1/chat/completions \
+              -H 'Content-Type: application/json' -H 'Authorization: Bearer local-k' \
+              --data-binary @$t.json)
+            echo "opencode2iori $t=$code" >> $GITHUB_STEP_SUMMARY
+            sleep 2
+          done
+          kill $IO 2>/dev/null
+          sleep 1
+          # 3) gw-A 原始通道版
+          chmod +x bin/gw-A
+          PORT=$((18300+S)) DIRECT_SIDECAR=off DIRECT_UA="opencode/latest/2.2.5/cli" \
+          DIRECT_FREELIMIT_COOLDOWN=0 ZEN_TOOL_CHANNEL=1 \
+          HTTPS_PROXY="" HTTP_PROXY="" https_proxy="" http_proxy="" ALL_PROXY="" \
+          ./bin/gw-A > gw-a.log 2>&1 &
+          GA=$!
+          for i in $(seq 1 30); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:$((18300+S))/health)" = "200" ] && break
+            sleep 1
+          done
+          for t in plain tools multi; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 120 \
+              -X POST http://127.0.0.1:$((18300+S))/v1/chat/completions \
+              -H 'Content-Type: application/json' -H 'Authorization: Bearer public' \
+              --data-binary @$t.json)
+            echo "gw-A $t=$code" >> $GITHUB_STEP_SUMMARY
+            sleep 2
+          done
+          kill $GA 2>/dev/null
