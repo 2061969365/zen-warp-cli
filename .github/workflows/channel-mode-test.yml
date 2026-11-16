@@ -90,6 +90,41 @@ jobs:
               print("parse error:", e)
           PY
 
+
+      - name: Build multi-turn tool-result request
+        run: |
+          python3 - <<'PY'
+          import json
+          body = {
+            "model": "deepseek-v4.1-flash-free",
+            "messages": [
+              {"role": "user", "content": "Use web_search to search opencode"},
+              {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "call_1", "type": "function", "function": {
+                  "name": "web_search", "arguments": "{\"query\":\"opencode\"}"}}
+              ]},
+              {"role": "tool", "tool_call_id": "call_1", "content": "opencode is an AI coding agent"}
+            ],
+            "stream": False,
+            "tools": [{"type": "function", "function": {
+              "name": "web_search", "description": "Search web.",
+              "parameters": {"type": "object", "properties": {"query": {"type": "string"}}}}}]
+          }
+          json.dump(body, open("multi.json", "w"), ensure_ascii=False)
+          print("multi-turn request built")
+          PY
+
+      - name: Run multi-turn request
+        run: |
+          set +e
+          code=$(curl -s -o multi_resp.json -w '%{http_code}' --max-time 180 \
+            -X POST http://127.0.0.1:18081/v1/chat/completions \
+            -H 'Content-Type: application/json' -H 'Authorization: Bearer public' \
+            --data-binary @multi.json)
+          echo "MULTI_HTTP_CODE=$code" | tee -a result.txt
+          echo "--- multi response ---"
+          head -c 1200 multi_resp.json
+          echo
       - name: Summary
         if: always()
         run: |
