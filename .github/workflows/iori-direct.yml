@@ -1,0 +1,126 @@
+name: iori-direct
+
+# 直接部署 opencode2iori（别人的完整方案）：
+# WARP 出口 + anonymous 匿名通道（public 凭据）+ v2 /inference，
+# 同一出口依次测 plain / tools / multi / 45tools，拿它的成绩单。
+on:
+  workflow_dispatch:
+
+jobs:
+  iori:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: fscarmen/warp-on-actions@v1.3
+        with:
+          stack: dual
+          mode: client
+      - name: Fix DNS
+        run: |
+          sudo systemctl stop systemd-resolved 2>/dev/null || true
+          sudo rm -f /etc/resolv.conf
+          echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+          echo "WARP_EXIT=$(curl -s --max-time 10 https://api.ipify.org || echo '?')" | tee -a $GITHUB_STEP_SUMMARY
+
+      - name: Configure
+        run: |
+          mkdir -p cfg
+          cat > cfg/config.json <<'EOF'
+          {
+            "listen": "127.0.0.1:8080",
+            "server_keys": ["local-test-key"],
+            "zen_keys": [],
+            "go_keys": [],
+            "anonymous": true,
+            "warp": {"enabled": false, "pool_size": 2, "stack": "ipv4", "source_ipv6": ""},
+            "proxies": ["direct"],
+            "upstream": {
+              "zen": "https://opencode.ai/zen",
+              "go": "https://opencode.ai/zen/go",
+              "anonymous": "https://opencode.ai/inference"
+            },
+            "retry": {"max_attempts": 3, "timeout_seconds": 300},
+            "models": {"refresh_seconds": 300, "protocols": {}, "free_only": true, "active_probes": false}
+          }
+          EOF
+
+      - name: Start gateway
+        run: |
+          chmod +x bin/opencode2iori
+          ./bin/opencode2iori -config cfg/config.json > gw.log 2>&1 &
+          for i in $(seq 1 40); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:8080/healthz)" = "200" ] && break
+            sleep 1
+          done
+          curl -s http://127.0.0.1:8080/healthz | head -c 300 | tee -a $GITHUB_STEP_SUMMARY
+          echo | tee -a $GITHUB_STEP_SUMMARY
+          grep -o '"version":"[^"]*"' gw.log | head -1 | tee -a $GITHUB_STEP_SUMMARY || true
+
+      - name: Build requests
+        run: |
+          python3 - <<'PY'
+          import json
+          names = ["pwsh","read","write","edit","glob","grep","skill","subagent",
+                   "web_search","web_fetch","team_task_create","team_task_list",
+                   "send_message","spawn_teammate","list_agents","todo_write","workflow"]
+          tools = [{"type":"function","function":{"name":n,"description":"Tool "+n+".",
+                    "parameters":{"type":"object","properties":{"query":{"type":"string"}}}}} for n in names]
+          json.dump({"model":"deepseek-v4.1-flash-free",
+                     "messages":[{"role":"user","content":"say ok"}],"stream":False},
+                    open("plain.json","w"))
+          json.dump({"model":"deepseek-v4.1-flash-free",
+                     "messages":[{"role":"user","content":"search opencode"}],
+                     "stream":False,"tools":tools}, open("tools.json","w"))
+          json.dump({"model":"deepseek-v4.1-flash-free",
+                     "messages":[
+                       {"role":"user","content":"search opencode"},
+                       {"role":"assistant","content":None,"tool_calls":[
+                         {"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\":\"opencode\"}"}}]},
+                       {"role":"tool","tool_call_id":"call_1","content":"opencode is an AI agent"}],
+                     "stream":False,"tools":tools}, open("multi.json","w"))
+          print("built")
+          PY
+
+      - name: Run 4 requests
+        run: |
+          set +e
+          for t in plain tools multi; do
+            code=$(curl -s -o r-$t.json -w '%{http_code}' --max-time 180 \
+              -X POST http://127.0.0.1:8080/v1/chat/completions \
+              -H 'Content-Type: application/json' -H 'Authorization: Bearer local-test-key' \
+              --data-binary @$t.json)
+            echo "$t=$code" | tee -a $GITHUB_STEP_SUMMARY
+            head -c 200 r-$t.json | tr '\n' ' ' | tee -a $GITHUB_STEP_SUMMARY
+            echo | tee -a $GITHUB_STEP_SUMMARY
+            sleep 3
+          done
+          # 45 工具大请求
+          python3 - <<'PY'
+          import json
+          names = ["pwsh","read","write","edit","glob","grep","skill","subagent",
+                   "web_search","web_fetch","team_task_create","team_task_list",
+                   "team_task_update","team_task_get","send_message","spawn_teammate",
+                   "list_agents","interrupt_agent","wait_agent","create_goal",
+                   "update_goal","todo_write","workflow","schedule_create","schedule_delete",
+                   "schedule_list","schedule_update","ask_user_question","read_image",
+                   "dsh_im_group_file","dsh_im_group_history","dsh_im_return_file",
+                   "exit_plan_mode","present","purge_apply","purge_revert","purge_status",
+                   "anysearch_search","anysearch_batch_search","anysearch_capabilities",
+                   "job_kill","job_list","job_output"]
+          tools=[{"type":"function","function":{"name":n,"description":"Tool "+n+".",
+                  "parameters":{"type":"object","properties":{"query":{"type":"string"}}}}} for n in names]
+          json.dump({"model":"deepseek-v4.1-flash-free",
+                     "messages":[{"role":"user","content":"Use web_search to search opencode"}],
+                     "stream":False,"tools":tools}, open("req45.json","w"))
+          PY
+          code=$(curl -s -o r-45.json -w '%{http_code}' --max-time 180 \
+            -X POST http://127.0.0.1:8080/v1/chat/completions \
+            -H 'Content-Type: application/json' -H 'Authorization: Bearer local-test-key' \
+            --data-binary @req45.json)
+          echo "45tools=$code" | tee -a $GITHUB_STEP_SUMMARY
+          python3 -c "import json;r=json.load(open('r-45.json'));c=r.get('choices',[{}])[0].get('message',{}).get('tool_calls',[]);print('TOOL_CALLS=',len(c));[print(' name=',x['function'].get('name'),'args=',x['function'].get('arguments')) for x in c]" | tee -a $GITHUB_STEP_SUMMARY
+
+      - name: Gateway log tail
+        if: always()
+        run: tail -30 gw.log | tee -a $GITHUB_STEP_SUMMARY
