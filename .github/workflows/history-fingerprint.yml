@@ -1,0 +1,70 @@
+name: history-fingerprint
+
+# 单变量隔离：历史消息形状的哪个字段触发 429。
+# 每 shard 先发 plain 探针确认出口健康，再测一个变体。
+on:
+  workflow_dispatch:
+
+jobs:
+  v:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: fscarmen/warp-on-actions@v1.3
+        with:
+          stack: dual
+          mode: client
+      - name: Fix DNS
+        run: |
+          sudo systemctl stop systemd-resolved 2>/dev/null || true
+          sudo rm -f /etc/resolv.conf
+          echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+          EXIT=$(curl -s --max-time 10 https://api.ipify.org || echo '?')
+          echo "shard ${{ matrix.shard }} EXIT=$EXIT" | tee -a $GITHUB_STEP_SUMMARY
+
+      - name: Variant test (direct to upstream)
+        run: |
+          set +e
+          S=${{ matrix.shard }}
+          # plain 探针：出口健康
+          echo '{"model":"deepseek-v4.1-flash-free","messages":[{"role":"user","content":"say ok"}],"stream":false}' > plain.json
+          pc=$(curl -s -o /dev/null -w '%{http_code}' --max-time 90 -X POST https://opencode.ai/inference/v1/chat/completions \
+            -H 'Authorization: Bearer public' -H 'Content-Type: application/json' \
+            -H 'User-Agent: opencode/latest/2.2.5/cli' \
+            --data-binary @plain.json)
+          echo "plain_probe=$pc" | tee -a $GITHUB_STEP_SUMMARY
+          sleep 2
+          python3 - "$S" <<'PY'
+          import json, sys
+          s = int(sys.argv[1])
+          tid = "call_1" if s == 1 else ("call_" + "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6")
+          body = {
+            "model": "deepseek-v4.1-flash-free",
+            "messages": [
+              {"role": "system", "content": "You are opencode, an interactive CLI tool that helps users with software engineering tasks."},
+              {"role": "user", "content": "search opencode"},
+              {"role": "assistant", "content": None, "tool_calls": [
+                {"id": tid, "type": "function", "function": {"name": "websearch", "arguments": "{\"query\":\"opencode\"}"}}]},
+              {"role": "tool", "tool_call_id": tid, "content": "opencode is an AI agent"}
+            ],
+            "stream": False,
+            "tools": [{"type":"function","function":{"name":"websearch","description":"Search the web.",
+              "parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false},"strict":False}}],
+            "stream_options": {"include_usage": True}
+          }
+          if s == 3:
+              del body["messages"][2]["content"]
+          json.dump(body, open(f"var{s}.json", "w"))
+          print("variant", s, "id=", tid)
+          PY
+          vc=$(curl -s -o rv-$S.json -w '%{http_code}' --max-time 120 -X POST https://opencode.ai/inference/v1/chat/completions \
+            -H 'Authorization: Bearer public' -H 'Content-Type: application/json' \
+            -H 'User-Agent: opencode/latest/2.2.5/cli' \
+            --data-binary @var$S.json)
+          echo "variant$S=$vc" | tee -a $GITHUB_STEP_SUMMARY
+          head -c 150 rv-$S.json | tr '\n' ' ' | tee -a $GITHUB_STEP_SUMMARY
+          echo | tee -a $GITHUB_STEP_SUMMARY
