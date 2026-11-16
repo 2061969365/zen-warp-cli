@@ -71,7 +71,7 @@ jobs:
               -X POST http://127.0.0.1:$((18100+S))/v1/chat/completions \
               -H 'Content-Type: application/json' -H 'Authorization: Bearer public' \
               --data-binary @$t.json)
-            echo "zen-direct $t=$code" >> $GITHUB_STEP_SUMMARY
+            echo "zen-direct $t=$code" | tee -a $GITHUB_STEP_SUMMARY
             sleep 2
           done
           kill $ZD 2>/dev/null
@@ -98,7 +98,7 @@ jobs:
               -X POST http://127.0.0.1:$((18200+S))/v1/chat/completions \
               -H 'Content-Type: application/json' -H 'Authorization: Bearer local-k' \
               --data-binary @$t.json)
-            echo "opencode2iori $t=$code" >> $GITHUB_STEP_SUMMARY
+            echo "opencode2iori $t=$code" | tee -a $GITHUB_STEP_SUMMARY
             sleep 2
           done
           kill $IO 2>/dev/null
@@ -119,7 +119,7 @@ jobs:
               -X POST http://127.0.0.1:$((18300+S))/v1/chat/completions \
               -H 'Content-Type: application/json' -H 'Authorization: Bearer public' \
               --data-binary @$t.json)
-            echo "gw-A $t=$code" >> $GITHUB_STEP_SUMMARY
+            echo "gw-A $t=$code" | tee -a $GITHUB_STEP_SUMMARY
             sleep 2
           done
           kill $GA 2>/dev/null
