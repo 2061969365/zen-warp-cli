@@ -1,7 +1,7 @@
 name: vpngate-direct
 
-# VPNGate 住宅出口实测：sing-box OpenVPN 接入 VPNGate 节点，
-# 在该出口上跑 zen-direct v0.9.27，依次测 plain / tools / multi / 45tools。
+# VPNGate 住宅出口实测（对齐模板用法）：
+# sing-box mixed 代理 127.0.0.1:18080，zen-direct 经 HTTPS_PROXY 走该出口。
 on:
   workflow_dispatch:
 
@@ -28,26 +28,42 @@ jobs:
           echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
           echo "RAW_EXIT=$(curl -s --max-time 10 https://api.ipify.org || echo '?')" | tee -a $GITHUB_STEP_SUMMARY
 
-      - name: Probe and connect VPNGate
+      - name: Probe and select VPNGate node
         run: |
-          curl -s --compressed -m 20 -o /tmp/vg.csv "https://www.vpngate.net/api/iphone/" || true
-          wc -l /tmp/vg.csv
-          python3 scripts/probe_and_select_vpngate.py --csv /tmp/vg.csv --output /tmp/sb.json --concurrency 50 --handshake-timeout 6 || true
-          ls -l /tmp/sb.json || { echo "NO_NODE"; exit 1; }
-          sudo sing-box run -c /tmp/sb.json > /tmp/sb.log 2>&1 &
-          for i in $(seq 1 30); do
-            IP=$(curl -s --max-time 8 https://api.ipify.org || echo '')
+          curl -s --compressed -m 30 -o /tmp/vg.csv "https://www.vpngate.net/api/iphone/" || true
+          wc -l /tmp/vg.csv || true
+          chmod +x bin/zen-direct
+          python3 scripts/probe_and_select_vpngate.py --csv /tmp/vg.csv --output /tmp/sb.json \
+            --zen-bin bin/zen-direct --concurrency 20 --max-candidates 35 --keep-nodes 3 \
+            --mixed-port 18080 || true
+          if [ -s /tmp/sb.json ]; then
+            sing-box run -c /tmp/sb.json > /tmp/singbox.log 2>&1 &
+            for i in $(seq 1 60); do
+              if (exec 3<>/dev/tcp/127.0.0.1/18080) 2>/dev/null; then exec 3>&-; break; fi
+              sleep 0.5
+            done
+            echo "sing-box mixed port up"
+          else
+            echo "NO_NODE: 未筛选出可用节点" | tee -a $GITHUB_STEP_SUMMARY
+            tail -20 /tmp/singbox.log 2>/dev/null || true
+          fi
+
+      - name: Verify VPNGate exit
+        run: |
+          set +e
+          for i in 1 2 3; do
+            IP=$(curl -s -x http://127.0.0.1:18080 --max-time 15 https://api.ipify.org || echo '')
             [ -n "$IP" ] && break
-            sleep 2
+            sleep 3
           done
           echo "VPN_EXIT=$IP" | tee -a $GITHUB_STEP_SUMMARY
 
-      - name: Start gateway v0.9.27
+      - name: Start gateway through VPNGate
         run: |
           chmod +x bin/zen-direct
           PORT=18081 DIRECT_SIDECAR=off DIRECT_UA="opencode/latest/2.2.5/cli" \
           DIRECT_FREELIMIT_COOLDOWN=0 ZEN_TOOL_CHANNEL=1 \
-          HTTPS_PROXY="" HTTP_PROXY="" https_proxy="" http_proxy="" ALL_PROXY="" \
+          HTTPS_PROXY="http://127.0.0.1:18080" HTTP_PROXY="http://127.0.0.1:18080" \
           ./bin/zen-direct > gw.log 2>&1 &
           for i in $(seq 1 30); do
             [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:18081/health)" = "200" ] && break
@@ -109,3 +125,9 @@ jobs:
           echo "45tools=$code" | tee -a $GITHUB_STEP_SUMMARY
           head -c 200 r-45.json | tr '\n' ' ' | tee -a $GITHUB_STEP_SUMMARY
           echo | tee -a $GITHUB_STEP_SUMMARY
+
+      - name: Log tail
+        if: always()
+        run: |
+          tail -10 gw.log | tee -a $GITHUB_STEP_SUMMARY || true
+          tail -5 /tmp/singbox.log 2>/dev/null | tee -a $GITHUB_STEP_SUMMARY || true
