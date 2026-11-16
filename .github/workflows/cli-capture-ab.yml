@@ -1,0 +1,135 @@
+name: cli-capture-ab
+
+# WARP 出口上的官方 CLI <-> 网关 A/B 抓包（不终结 TLS、不改指纹）。
+# 目的：在同一条 WARP 出口上，取「官方 CLI 实际发出的请求」和「网关整形后的请求」，
+# 逐字段 diff，定位 429 的真实触发点（头 -> TLS -> body）。
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "模型 id（不带 provider/ 前缀）"
+        required: false
+        default: "deepseek-v4.1-flash-free"
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      MODEL: ${{ inputs.model }}
+    steps:
+      - name: pre-warp egress
+        run: |
+          curl -s -m 15 http://ip-api.com/json | python3 -c 'import json,sys;j=json.load(sys.stdin);print("RAW_IP",j.get("query"),j.get("as"))' || true
+
+      - name: Setup WARP
+        uses: fscarmen/warp-on-actions@v1.3
+        with:
+          stack: dual
+          mode: client
+
+      - name: Fix DNS
+        run: |
+          sudo systemctl stop systemd-resolved 2>/dev/null || true
+          sudo rm -f /etc/resolv.conf
+          echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+          echo "WARP_IPV4=$(curl -s --max-time 10 https://api.ipify.org || echo '?')"
+          curl -s --max-time 10 https://www.cloudflare.com/cdn-cgi/trace | grep -E 'ip=|warp=|loc=' || true
+
+      - name: install official cli
+        run: |
+          npm install -g @opencode/cli@2.2.5 >/tmp/npm.log 2>&1 || { tail -20 /tmp/npm.log; exit 1; }
+          echo "CLI_VERSION=$(opencode --version 2>&1 | head -1)"
+
+      - name: sink + capture CLI outbound
+        run: |
+          set -euo pipefail
+          mkdir -p cap/proj
+          cat > sink.py <<'PY'
+          import json, os, time
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+          OUT = "cap/cli_out"
+          N = {"n": 0}
+          class H(BaseHTTPRequestHandler):
+              protocol_version = "HTTP/1.1"
+              def do_GET(self):
+                  p = b'{"data":[],"object":"list"}'
+                  self.send_response(200); self.send_header("Content-Type","application/json")
+                  self.send_header("Content-Length",str(len(p))); self.end_headers(); self.wfile.write(p)
+              def do_POST(self):
+                  ln = int(self.headers.get("Content-Length") or 0)
+                  raw = self.rfile.read(ln) if ln else b""
+                  N["n"] += 1
+                  os.makedirs(OUT, exist_ok=True)
+                  slug = self.path.strip("/").replace("/","_") or "root"
+                  rec = {"seq":N["n"],"ts":time.time(),"path":self.path,
+                         "headers":[[k,v] for k,v in self.headers.items()],
+                         "body_len":len(raw),"body":raw.decode("utf-8","replace")}
+                  open(os.path.join(OUT,f"{N['n']:03d}-{slug}.json"),"w",encoding="utf-8").write(json.dumps(rec,ensure_ascii=False,indent=1))
+                  print(f"#{N['n']} {self.path} {len(raw)}B", flush=True)
+                  sse=(b'data: {"id":"s","object":"chat.completion.chunk","created":0,"model":"sink","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}\n\n'
+                       b'data: {"id":"s","object":"chat.completion.chunk","created":0,"model":"sink","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}\n\n'
+                       b'data: [DONE]\n\n')
+                  self.send_response(200); self.send_header("Content-Type","text/event-stream")
+                  self.send_header("Content-Length",str(len(sse))); self.end_headers(); self.wfile.write(sse)
+              def log_message(self,*a): pass
+          ThreadingHTTPServer.allow_reuse_address=True
+          ThreadingHTTPServer(("127.0.0.1",19100),H).serve_forever()
+          PY
+          nohup python3 -u sink.py > cap/sink.log 2>&1 &
+          sleep 2
+          mkdir -p "$HOME/.config/opencode"
+          cat > "$HOME/.config/opencode/opencode.json" <<EOF
+          {
+            "\$schema": "https://opencode.ai/config.json",
+            "provider": {"opencode": {"options": {"apiKey": "public", "baseURL": "http://127.0.0.1:19100/zen/v1"}}}
+          }
+          EOF
+          cd cap/proj
+          OPENCODE_DISABLE_AUTOUPDATE=1 NO_COLOR=1 timeout 180 opencode run -m "opencode/$MODEL" "read a.txt then tell me what it says" > ../cli_run.log 2>&1 || true
+          cd ../..
+          ls -l cap/cli_out || true
+
+      - name: A/B against real upstream
+        run: |
+          set +e
+          LAST=$(ls -1 cap/cli_out/*zen*v1_chat_completions*.json 2>/dev/null | sort | tail -1)
+          if [ -z "$LAST" ]; then echo "no chat_completions captured"; ls -l cap/cli_out; exit 0; fi
+          echo "USING $LAST"
+          jq -r '.body' "$LAST" > cap/cli_body.json
+          PROJ=$(jq -r '(.headers[]|select(.[0]=="x-opencode-project"))[1] // ""' "$LAST")
+          SES=$(jq -r '(.headers[]|select(.[0]=="x-opencode-session"))[1] // ""' "$LAST")
+          echo "PROJ=$PROJ SES=$SES body=$(wc -c < cap/cli_body.json)B"
+
+          code=$(curl -s -o cap/up.txt -w '%{http_code}' --max-time 120 \
+            -X POST "https://opencode.ai/zen/v1/chat/completions" \
+            -H "Authorization: Bearer public" -H "Content-Type: application/json" \
+            -H "User-Agent: opencode/latest/2.2.5/cli" -H "x-opencode-client: cli" \
+            -H "x-opencode-project: $PROJ" -H "x-opencode-session: $SES" \
+            -H "x-session-affinity: $SES" -H "x-session-id: $SES" \
+            --data-binary @cap/cli_body.json)
+          echo "UPSTREAM_REPLAY_CODE=$code"
+          head -c 300 cap/up.txt; echo
+
+      - name: Summary
+        if: always()
+        run: |
+          python3 - <<'PY' >> $GITHUB_STEP_SUMMARY
+          import glob, json, os
+          fs = sorted(glob.glob('cap/cli_out/*.json'))
+          print(f"### 抓到 {len(fs)} 条")
+          for f in fs:
+              r = json.load(open(f, encoding='utf-8'))
+              try: b = json.loads(r['body'])
+              except Exception: b = {}
+              ts = b.get('tools') or []
+              names = [((t.get('function') or {}).get('name') or t.get('name') or '?') for t in ts]
+              print(f"- `{os.path.basename(f)}` {r['body_len']}B tools={len(ts)} path={r['path']}")
+              if ts: print(f"  - {', '.join(names[:15])}")
+              if f is fs[-1]:
+                  print("  - headers:")
+                  for k, v in r['headers']:
+                      print(f"    - `{k}: {v}`")
+          try: print(f"- UPSTREAM_REPLAY: {open('cap/up.txt', encoding='utf-8', errors='replace').read()[:300]}")
+          except Exception: pass
+          PY
