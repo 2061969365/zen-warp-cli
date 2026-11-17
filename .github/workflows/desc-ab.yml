@@ -1,0 +1,79 @@
+name: desc-ab
+
+# 同一出口、同一次 run 内的 A/B：
+#   A) 真实 DSH 描述（含封禁短语原文）
+#   B) 同一批工具，仅描述换成中性措辞
+# 若 A=429 且 B=200 -> 确认描述文本仍被指纹（我们的环境与 jasonxu 1.4.8 的
+# "零触碰描述"假设不同），短语黑名单必须保留。
+on:
+  workflow_dispatch:
+
+jobs:
+  ab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: fscarmen/warp-on-actions@v1.3
+        with:
+          stack: dual
+          mode: client
+      - name: Fix DNS
+        run: |
+          sudo systemctl stop systemd-resolved 2>/dev/null || true
+          sudo rm -f /etc/resolv.conf
+          echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+          echo "WARP_EXIT=$(curl -s --max-time 10 https://api.ipify.org || echo '?')" | tee -a $GITHUB_STEP_SUMMARY
+
+      - name: Build A (real desc) and B (neutral desc)
+        run: |
+          set +e
+          python3 - <<'PY'
+          import json
+          def mk(desc_read, desc_edit, desc_pwsh, desc_web):
+              return [
+                {"type":"function","function":{"name":"read","description":desc_read,"parameters":{"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"]}}},
+                {"type":"function","function":{"name":"edit","description":desc_edit,"parameters":{"type":"object","properties":{"file_path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["file_path","old_string","new_string"]}}},
+                {"type":"function","function":{"name":"pwsh","description":desc_pwsh,"parameters":{"type":"object","properties":{"command":{"type":"string"},"description":{"type":"string"}},"required":["description","command"]}}},
+                {"type":"function","function":{"name":"web_search","description":desc_web,"parameters":{"type":"object","properties":{"queries":{"type":"array","items":{"type":"string"}}},"required":["queries"]}},
+              ]
+          A = mk("Read a UTF-8 text file and return line-numbered content.",
+                 "Edit an existing UTF-8 text file by replacing literal text.",
+                 "Execute a PowerShell command and return its stdout/stderr. Each call runs in a fresh pwsh process.",
+                 "Search the web for current information. Returns an optional summary answer and a list of source URLs.")
+          B = mk("Read a text file and return line-numbered output.",
+                 "Edit an existing text file by replacing literal text.",
+                 "Execute a shell command and return its output. Each call runs in a fresh process.",
+                 "Search the web for current information. Returns an optional summary answer and a list of source URLs.")
+          for name, tools in (("A", A), ("B", B)):
+              json.dump({"model":"deepseek-v4.1-flash-free",
+                         "messages":[{"role":"user","content":"search opencode"}],
+                         "stream":False,"tools":tools}, open(f"{name}.json","w"))
+          print("built A B")
+          PY
+
+      - name: Start gateway (verbatim desc mode)
+        run: |
+          set +e
+          chmod +x bin/zen-direct
+          PORT=18081 DIRECT_SIDECAR=off DIRECT_UA="opencode/latest/2.2.5/cli" \
+          DIRECT_FREELIMIT_COOLDOWN=0 ZEN_TOOL_CHANNEL=0 ZEN_DESC_VERBATIM=1 \
+          HTTPS_PROXY="" HTTP_PROXY="" https_proxy="" http_proxy="" ALL_PROXY="" \
+          ./bin/zen-direct > gw.log 2>&1 &
+          for i in $(seq 1 30); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:18081/health)" = "200" ] && break
+            sleep 1
+          done
+          grep -o 'v0\.9\.[0-9]*' gw.log | head -1 | sed 's/^/VER=/' | tee -a $GITHUB_STEP_SUMMARY
+
+      - name: A then B then A again
+        run: |
+          set +e
+          for t in A B A; do
+            code=$(curl -s -o out-$t.json -w '%{http_code}' --max-time 120 \
+              -X POST http://127.0.0.1:18081/v1/chat/completions \
+              -H 'Content-Type: application/json' -H 'Authorization: Bearer public' \
+              --data-binary @${t}.json)
+            echo "$t=$code" | tee -a $GITHUB_STEP_SUMMARY
+            sleep 4
+          done
