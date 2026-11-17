@@ -33,7 +33,8 @@ cat > "$ROOT/o2a.json" <<'JSON'
 }
 JSON
 
-./bin/o2a-v148 -config "$ROOT/o2a.json" >"$RUN/o2a.log" 2>&1 &
+O2A_BIN="${O2A_BIN:-./bin/o2a-v148}"
+"$O2A_BIN" -config "$ROOT/o2a.json" >"$RUN/o2a.log" 2>&1 &
 echo $! > "$RUN/o2a.pid"
 
 PORT=8081 \

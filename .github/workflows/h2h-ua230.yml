@@ -1,0 +1,41 @@
+name: h2h-ua230
+
+# 回答一个问题：opencode2api v1.4.8 只要把 UA 版本从 2.1.1 改成 2.3.0 就完全可用了吗？
+# 用改过 UA 的那个二进制（其余字节不变）去打"真实 DSH 工具描述"的形态，
+# 并且让它占首槽位（全新出口、额度未消耗），排除额度干扰。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fix:
+    name: ua230-${{ matrix.shape }}-r${{ matrix.rep }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        shape: [rd_stream, rd1_read, rd1_edit, real_dsh, rd_stream_clean]
+        rep: [1, 2]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: boot gateways
+        env:
+          O2A_BIN: ./bin/o2a-ua230
+        run: bash scripts/boot.sh
+
+      - name: measure
+        run: |
+          set -o pipefail
+          bash scripts/h2h.sh "${{ matrix.shape }}" o2a_first "${{ matrix.rep }}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: o2a tail
+        if: always()
+        run: |
+          tail -n 8 run/o2a.log 2>/dev/null || true
