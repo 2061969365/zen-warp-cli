@@ -1,0 +1,42 @@
+name: h2h-ua
+
+# opencode2api v1.4.8 的 v2ClientVersion 硬编码 2.1.1；zen-direct 会自动跟到 npm 最新（当前 2.3.0）。
+# 第五轮之后 opencode2api 在所有新出口上 0/28、连 plain 都 429，而同一 IP 上 zen 200。
+# 这里用"只改 v2ClientVersion = 2.3.0"的同一个二进制做对照，隔离 UA 版本这个变量。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ua:
+    name: ua-${{ matrix.order }}-r${{ matrix.rep }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        order: [ua230_first, stock_first]
+        rep: [1, 2, 3, 4]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: boot gateways
+        run: bash scripts/boot-ua.sh
+
+      - name: measure
+        run: |
+          set -o pipefail
+          bash scripts/ua2.sh "${{ matrix.order }}" "${{ matrix.rep }}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: logs
+        if: always()
+        run: |
+          echo "=== stock tail ==="
+          tail -n 6 run/o2a.log 2>/dev/null || true
+          echo "=== ua230 tail ==="
+          tail -n 6 run/o2a-ua230.log 2>/dev/null || true
