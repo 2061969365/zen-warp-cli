@@ -1,0 +1,41 @@
+name: h2h-params
+
+# 第四轮：round2 里 rd1_read_clean（1 个官方工具 read + 中性描述 + 真实 DSH 参数 + stream）
+# 出现 zen 429 / o2a 200，但 round3 的官方子集全 200。差别只在 stream 与参数结构。
+# 这里把 stream × 参数结构 拆成 2×2，外加 4 工具版本。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  h2h:
+    name: h2h-${{ matrix.shape }}-${{ matrix.order }}-r${{ matrix.rep }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        shape: [q1_st_realp, q1_st_genp, q1_ns_realp, q1_ns_genp, q4_st_realp, q4_st_genp]
+        order: [zen_first, o2a_first]
+        rep: [1, 2]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: boot gateways
+        run: bash scripts/boot.sh
+
+      - name: measure
+        run: |
+          set -o pipefail
+          bash scripts/h2h.sh "${{ matrix.shape }}" "${{ matrix.order }}" "${{ matrix.rep }}" | tee -a "$GITHUB_STEP_SUMMARY" | tee run/result.txt
+
+      - name: gateway logs
+        if: always()
+        run: |
+          echo "=== zen.log tail ==="
+          tail -n 25 run/zen.log 2>/dev/null || true
