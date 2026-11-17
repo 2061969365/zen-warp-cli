@@ -1,0 +1,52 @@
+name: head2head
+
+# 同一台 runner = 同一个出口 IP，两个网关各打一发同样的请求。
+# 每个 matrix 单元是一台全新 runner，也就是一个全新的 action 出口 IP。
+# order 维度用来抵消"先进先出烧配额"：zen_first / o2a_first 各占一半。
+
+on:
+  workflow_dispatch:
+    inputs:
+      mp:
+        description: "max parallel jobs"
+        required: false
+        default: "12"
+
+permissions:
+  contents: read
+
+jobs:
+  h2h:
+    name: h2h-${{ matrix.shape }}-${{ matrix.order }}-r${{ matrix.rep }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        shape: [plain, real_dsh, multi45, multi3]
+        order: [zen_first, o2a_first]
+        rep: [1, 2, 3]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: boot gateways
+        run: bash scripts/boot.sh
+
+      - name: measure
+        run: |
+          set -o pipefail
+          bash scripts/h2h.sh "${{ matrix.shape }}" "${{ matrix.order }}" "${{ matrix.rep }}" | tee -a "$GITHUB_STEP_SUMMARY" | tee run/result.txt
+
+      - name: gateway logs
+        if: always()
+        run: |
+          echo "=== o2a.log tail ==="
+          tail -n 30 run/o2a.log 2>/dev/null || true
+          echo "=== zen.out tail ==="
+          tail -n 30 run/zen.out 2>/dev/null || true
+          echo "=== zen.log tail ==="
+          tail -n 30 run/zen.log 2>/dev/null || true
+          echo "=== curl err ==="
+          cat run/*.err 2>/dev/null || true
