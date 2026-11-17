@@ -9,6 +9,7 @@ mkdir -p "$RUN"
 cd "$ROOT"
 
 chmod +x bin/zen-direct bin/o2a-v148
+[ -f bin/o2a-ua230 ] && chmod +x bin/o2a-ua230 || true
 
 # opencode2api 的配置：匿名免费层、直连（用 runner 自己的出口）、不开 WARP、不开 WebUI。
 cat > "$ROOT/o2a.json" <<'JSON'
