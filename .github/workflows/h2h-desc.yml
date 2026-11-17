@@ -1,0 +1,42 @@
+name: h2h-desc
+
+# 第二轮：锁定第一轮里 opencode2api 在 real_dsh 形态上 6/6 全 429 的根因。
+# 变量逐个拆开：stream 与否、单个工具 vs 四个工具、真实描述 vs 中性描述 vs 无描述。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  h2h:
+    name: h2h-${{ matrix.shape }}-${{ matrix.order }}-r${{ matrix.rep }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      max-parallel: 14
+      matrix:
+        shape: [rd_stream, rd_nostream, rd1_read, rd1_read_clean, rd1_edit, rd_stream_clean, rd_stream_nodesc]
+        order: [zen_first, o2a_first]
+        rep: [1, 2]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: boot gateways
+        run: bash scripts/boot.sh
+
+      - name: measure
+        run: |
+          set -o pipefail
+          bash scripts/h2h.sh "${{ matrix.shape }}" "${{ matrix.order }}" "${{ matrix.rep }}" | tee -a "$GITHUB_STEP_SUMMARY" | tee run/result.txt
+
+      - name: gateway logs
+        if: always()
+        run: |
+          echo "=== o2a.log tail ==="
+          tail -n 25 run/o2a.log 2>/dev/null || true
+          echo "=== zen.log tail ==="
+          tail -n 25 run/zen.log 2>/dev/null || true
