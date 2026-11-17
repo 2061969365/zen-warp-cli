@@ -65,7 +65,7 @@ jobs:
             code=$(curl -s -o r-$t.json -w '%{http_code}' --max-time 120 \
               -X POST http://127.0.0.1:18081/v1/chat/completions \
               -H 'Content-Type: application/json' -H 'Authorization: Bearer public' \
-              --data-binary @r-$t.json)
+              --data-binary @${t}.json)
             echo "$t=$code" | tee -a $GITHUB_STEP_SUMMARY
             head -c 200 r-$t.json | tr '\n' ' ' | tee -a $GITHUB_STEP_SUMMARY
             echo | tee -a $GITHUB_STEP_SUMMARY
