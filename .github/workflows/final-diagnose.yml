@@ -49,7 +49,7 @@ jobs:
           set +e
           chmod +x bin/zen-direct
           PORT=18081 DIRECT_SIDECAR=off DIRECT_UA="opencode/latest/2.2.5/cli" \
-          DIRECT_FREELIMIT_COOLDOWN=0 ZEN_TOOL_CHANNEL=1 \
+          DIRECT_FREELIMIT_COOLDOWN=0 \
           HTTPS_PROXY="" HTTP_PROXY="" https_proxy="" http_proxy="" ALL_PROXY="" \
           ./bin/zen-direct > gw.log 2>&1 &
           for i in $(seq 1 30); do
