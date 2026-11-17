@@ -1,0 +1,39 @@
+name: h2h-o2a-health
+
+# 第五轮里 opencode2api 在 28 个出口上全 429，连 round1 里 12/12 通过的 multi45 也 429。
+# 同样的字节、同样的 runner、同样的直连出口，只换了时间 → 怀疑是状态/时间相关，不是 body 相关。
+# 这里只做一件事：现在立刻用最朴素的 plain 形态重测 6 个新出口，zen 作同 IP 对照。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  health:
+    name: o2a-health-r${{ matrix.rep }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        rep: [1, 2, 3, 4, 5, 6]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: boot gateways
+        run: bash scripts/boot.sh
+
+      - name: measure
+        run: |
+          set -o pipefail
+          bash scripts/h2h.sh plain zen_first "${{ matrix.rep }}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: o2a full log
+        if: always()
+        run: |
+          echo "=== o2a.log (full) ==="
+          cat run/o2a.log 2>/dev/null || true
