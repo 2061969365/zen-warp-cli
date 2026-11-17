@@ -1,0 +1,73 @@
+name: verbatim-desc-test
+
+# 决定性实验：mcp_ 名下关闭描述脱敏（ZEN_DESC_VERBATIM=1），
+# 真实 DSH 描述（含封禁短语原文）能否通过。对照 jasonxu v1.4.8
+# 的零触碰行为。
+on:
+  workflow_dispatch:
+
+jobs:
+  v:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: fscarmen/warp-on-actions@v1.3
+        with:
+          stack: dual
+          mode: client
+      - name: Fix DNS
+        run: |
+          sudo systemctl stop systemd-resolved 2>/dev/null || true
+          sudo rm -f /etc/resolv.conf
+          echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+          echo "WARP_EXIT=$(curl -s --max-time 10 https://api.ipify.org || echo '?')" | tee -a $GITHUB_STEP_SUMMARY
+
+      - name: Start gateway (verbatim desc)
+        run: |
+          set +e
+          chmod +x bin/zen-direct
+          PORT=18081 DIRECT_SIDECAR=off DIRECT_UA="opencode/latest/2.2.5/cli" \
+          DIRECT_FREELIMIT_COOLDOWN=0 ZEN_TOOL_CHANNEL=0 ZEN_DESC_VERBATIM=1 \
+          HTTPS_PROXY="" HTTP_PROXY="" https_proxy="" http_proxy="" ALL_PROXY="" \
+          ./bin/zen-direct > gw.log 2>&1 &
+          for i in $(seq 1 30); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:18081/health)" = "200" ] && break
+            sleep 1
+          done
+          grep -o 'v0\.9\.[0-9]*' gw.log | head -1 | sed 's/^/VER=/' | tee -a $GITHUB_STEP_SUMMARY
+
+      - name: Run real-desc requests
+        run: |
+          set +e
+          python3 - <<'PY'
+          import json
+          # 真实 DSH 描述（含封禁短语原文：UTF-8 text file / line-numbered content）
+          tools = [
+            {"type":"function","function":{"name":"read","description":"Read a UTF-8 text file and return line-numbered content.","parameters":{"type":"object","properties":{"file_path":{"type":"string","description":"Path to read"},"offset":{"type":"number","description":"1-based first line to return"},"limit":{"type":"number","description":"Maximum number of lines to return"}},"required":["file_path"]}}},
+            {"type":"function","function":{"name":"edit","description":"Edit an existing UTF-8 text file by replacing literal text.","parameters":{"type":"object","properties":{"file_path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["file_path","old_string","new_string"]}}},
+            {"type":"function","function":{"name":"pwsh","description":"Execute a PowerShell command and return its stdout/stderr. Each call runs in a fresh pwsh process.","parameters":{"type":"object","properties":{"command":{"type":"string","description":"The PowerShell command to execute."},"description":{"type":"string","description":"Clear, concise description of what this command does in active voice, 5-10 words."}},"required":["description","command"]}}},
+            {"type":"function","function":{"name":"web_search","description":"Search the web for current information. Returns an optional summary answer and a list of source URLs.","parameters":{"type":"object","properties":{"queries":{"type":"array","items":{"type":"string"},"description":"1-4 search queries; their results are merged."}}},"required":["queries"]}},
+          ]
+          json.dump({"model":"deepseek-v4.1-flash-free",
+                     "messages":[{"role":"user","content":"search opencode"}],
+                     "stream":False,"tools":tools}, open("single.json","w"))
+          json.dump({"model":"deepseek-v4.1-flash-free",
+                     "messages":[
+                       {"role":"user","content":"search opencode"},
+                       {"role":"assistant","content":None,"tool_calls":[
+                         {"id":"call_0","type":"function","function":{"name":"web_search","arguments":"{\"queries\":[\"opencode\"]}"}}]},
+                       {"role":"tool","tool_call_id":"call_0","content":"opencode is an AI coding agent"}],
+                     "stream":False,"tools":tools}, open("multi.json","w"))
+          print("built")
+          PY
+          for t in single multi; do
+            code=$(curl -s -o r-$t.json -w '%{http_code}' --max-time 120 \
+              -X POST http://127.0.0.1:18081/v1/chat/completions \
+              -H 'Content-Type: application/json' -H 'Authorization: Bearer public' \
+              --data-binary @r-$t.json)
+            echo "$t=$code" | tee -a $GITHUB_STEP_SUMMARY
+            head -c 200 r-$t.json | tr '\n' ' ' | tee -a $GITHUB_STEP_SUMMARY
+            echo | tee -a $GITHUB_STEP_SUMMARY
+            sleep 3
+          done
