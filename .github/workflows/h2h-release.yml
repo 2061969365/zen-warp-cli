@@ -1,0 +1,42 @@
+name: h2h-release
+
+# 发版前的定点闸门：只测 zen-direct，覆盖
+#   1) 修复面：q4_st_realp（官方名子集 + 真实 DSH 参数级描述，v0.9.37 时 0/4）
+#   2) 不回归：real_dsh / multi45 / r14_official_clean（完整官方集仍走透传）
+#   3) 基线：plain
+# zen 一律占首槽位（全新出口），不跟 opencode2api 抢额度。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: rel-${{ matrix.shape }}-r${{ matrix.rep }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        shape: [plain, real_dsh, multi45, q4_st_realp, r14_official_clean]
+        rep: [1, 2]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: boot gateways
+        run: bash scripts/boot.sh
+
+      - name: measure
+        run: |
+          set -o pipefail
+          bash scripts/h2h.sh "${{ matrix.shape }}" zen_first "${{ matrix.rep }}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: version
+        if: always()
+        run: |
+          echo "zen sha: $(sha256sum bin/zen-direct | cut -c1-16)"
+          grep -m1 "serving as" run/zen.log 2>/dev/null || true
