@@ -1,0 +1,39 @@
+name: h2h-uazen
+
+# 用同一个 zen-direct v0.9.38 二进制，只钉不同 DIRECT_UA_VERSION，
+# 判定上游免费层的版本下限到底在哪：2.1.1 / 2.2.0 / 2.3.0。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  uazen:
+    name: uazen-${{ matrix.low }}-${{ matrix.order }}-r${{ matrix.rep }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        low: ["2.1.1", "2.2.0"]
+        order: [low_first, high_first]
+        rep: [1, 2, 3]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: boot gateways
+        run: bash scripts/boot-uazen.sh
+
+      - name: measure
+        run: |
+          set -o pipefail
+          bash scripts/uazen.sh "${{ matrix.low }}" "${{ matrix.order }}" "${{ matrix.rep }}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: logs
+        if: always()
+        run: |
+          for f in run/zen-*.log; do echo "=== $f ==="; tail -n 4 "$f" 2>/dev/null || true; done
