@@ -1,10 +1,5 @@
 name: desc-ab
 
-# 同一出口、同一次 run 内的 A/B：
-#   A) 真实 DSH 描述（含封禁短语原文）
-#   B) 同一批工具，仅描述换成中性措辞
-# 若 A=429 且 B=200 -> 确认描述文本仍被指纹（我们的环境与 jasonxu 1.4.8 的
-# "零触碰描述"假设不同），短语黑名单必须保留。
 on:
   workflow_dispatch:
 
@@ -25,34 +20,13 @@ jobs:
           echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8" | sudo tee /etc/resolv.conf
           echo "WARP_EXIT=$(curl -s --max-time 10 https://api.ipify.org || echo '?')" | tee -a $GITHUB_STEP_SUMMARY
 
-      - name: Build A (real desc) and B (neutral desc)
+      - name: Restore payloads
         run: |
-          set +e
-          python3 - <<'PY'
-          import json
-          def mk(desc_read, desc_edit, desc_pwsh, desc_web):
-              return [
-                {"type":"function","function":{"name":"read","description":desc_read,"parameters":{"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"]}}},
-                {"type":"function","function":{"name":"edit","description":desc_edit,"parameters":{"type":"object","properties":{"file_path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["file_path","old_string","new_string"]}}},
-                {"type":"function","function":{"name":"pwsh","description":desc_pwsh,"parameters":{"type":"object","properties":{"command":{"type":"string"},"description":{"type":"string"}},"required":["description","command"]}}},
-                {"type":"function","function":{"name":"web_search","description":desc_web,"parameters":{"type":"object","properties":{"queries":{"type":"array","items":{"type":"string"}}},"required":["queries"]}},
-              ]
-          A = mk("Read a UTF-8 text file and return line-numbered content.",
-                 "Edit an existing UTF-8 text file by replacing literal text.",
-                 "Execute a PowerShell command and return its stdout/stderr. Each call runs in a fresh pwsh process.",
-                 "Search the web for current information. Returns an optional summary answer and a list of source URLs.")
-          B = mk("Read a text file and return line-numbered output.",
-                 "Edit an existing text file by replacing literal text.",
-                 "Execute a shell command and return its output. Each call runs in a fresh process.",
-                 "Search the web for current information. Returns an optional summary answer and a list of source URLs.")
-          for name, tools in (("A", A), ("B", B)):
-              json.dump({"model":"deepseek-v4.1-flash-free",
-                         "messages":[{"role":"user","content":"search opencode"}],
-                         "stream":False,"tools":tools}, open(f"{name}.json","w"))
-          print("built A B")
-          PY
+          echo 'eyJtb2RlbCI6ICJkZWVwc2Vlay12NC4xLWZsYXNoLWZyZWUiLCAibWVzc2FnZXMiOiBbeyJyb2xlIjogInVzZXIiLCAiY29udGVudCI6ICJzZWFyY2ggb3BlbmNvZGUifV0sICJzdHJlYW0iOiBmYWxzZSwgInRvb2xzIjogW3sidHlwZSI6ICJmdW5jdGlvbiIsICJmdW5jdGlvbiI6IHsibmFtZSI6ICJyZWFkIiwgImRlc2NyaXB0aW9uIjogIlJlYWQgYSBVVEYtOCB0ZXh0IGZpbGUgYW5kIHJldHVybiBsaW5lLW51bWJlcmVkIGNvbnRlbnQuIiwgInBhcmFtZXRlcnMiOiB7InR5cGUiOiAib2JqZWN0IiwgInByb3BlcnRpZXMiOiB7ImZpbGVfcGF0aCI6IHsidHlwZSI6ICJzdHJpbmcifSwgImNvbW1hbmQiOiB7InR5cGUiOiAic3RyaW5nIn0sICJxdWVyaWVzIjogeyJ0eXBlIjogImFycmF5IiwgIml0ZW1zIjogeyJ0eXBlIjogInN0cmluZyJ9fX0sICJyZXF1aXJlZCI6IFsiZmlsZV9wYXRoIl19fX0sIHsidHlwZSI6ICJmdW5jdGlvbiIsICJmdW5jdGlvbiI6IHsibmFtZSI6ICJlZGl0IiwgImRlc2NyaXB0aW9uIjogIkVkaXQgYW4gZXhpc3RpbmcgVVRGLTggdGV4dCBmaWxlIGJ5IHJlcGxhY2luZyBsaXRlcmFsIHRleHQuIiwgInBhcmFtZXRlcnMiOiB7InR5cGUiOiAib2JqZWN0IiwgInByb3BlcnRpZXMiOiB7ImZpbGVfcGF0aCI6IHsidHlwZSI6ICJzdHJpbmcifSwgImNvbW1hbmQiOiB7InR5cGUiOiAic3RyaW5nIn0sICJxdWVyaWVzIjogeyJ0eXBlIjogImFycmF5IiwgIml0ZW1zIjogeyJ0eXBlIjogInN0cmluZyJ9fX0sICJyZXF1aXJlZCI6IFsiZmlsZV9wYXRoIl19fX0sIHsidHlwZSI6ICJmdW5jdGlvbiIsICJmdW5jdGlvbiI6IHsibmFtZSI6ICJwd3NoIiwgImRlc2NyaXB0aW9uIjogIkV4ZWN1dGUgYSBQb3dlclNoZWxsIGNvbW1hbmQgYW5kIHJldHVybiBpdHMgc3Rkb3V0L3N0ZGVyci4gRWFjaCBjYWxsIHJ1bnMgaW4gYSBmcmVzaCBwd3NoIHByb2Nlc3MuIiwgInBhcmFtZXRlcnMiOiB7InR5cGUiOiAib2JqZWN0IiwgInByb3BlcnRpZXMiOiB7ImZpbGVfcGF0aCI6IHsidHlwZSI6ICJzdHJpbmcifSwgImNvbW1hbmQiOiB7InR5cGUiOiAic3RyaW5nIn0sICJxdWVyaWVzIjogeyJ0eXBlIjogImFycmF5IiwgIml0ZW1zIjogeyJ0eXBlIjogInN0cmluZyJ9fX0sICJyZXF1aXJlZCI6IFsiZmlsZV9wYXRoIl19fX0sIHsidHlwZSI6ICJmdW5jdGlvbiIsICJmdW5jdGlvbiI6IHsibmFtZSI6ICJ3ZWJfc2VhcmNoIiwgImRlc2NyaXB0aW9uIjogIlNlYXJjaCB0aGUgd2ViIGZvciBjdXJyZW50IGluZm9ybWF0aW9uLiBSZXR1cm5zIGFuIG9wdGlvbmFsIHN1bW1hcnkgYW5zd2VyIGFuZCBhIGxpc3Qgb2Ygc291cmNlIFVSTHMuIiwgInBhcmFtZXRlcnMiOiB7InR5cGUiOiAib2JqZWN0IiwgInByb3BlcnRpZXMiOiB7ImZpbGVfcGF0aCI6IHsidHlwZSI6ICJzdHJpbmcifSwgImNvbW1hbmQiOiB7InR5cGUiOiAic3RyaW5nIn0sICJxdWVyaWVzIjogeyJ0eXBlIjogImFycmF5IiwgIml0ZW1zIjogeyJ0eXBlIjogInN0cmluZyJ9fX0sICJyZXF1aXJlZCI6IFsiZmlsZV9wYXRoIl19fX1dfQ==' | base64 -d > A.json
+          echo 'eyJtb2RlbCI6ICJkZWVwc2Vlay12NC4xLWZsYXNoLWZyZWUiLCAibWVzc2FnZXMiOiBbeyJyb2xlIjogInVzZXIiLCAiY29udGVudCI6ICJzZWFyY2ggb3BlbmNvZGUifV0sICJzdHJlYW0iOiBmYWxzZSwgInRvb2xzIjogW3sidHlwZSI6ICJmdW5jdGlvbiIsICJmdW5jdGlvbiI6IHsibmFtZSI6ICJyZWFkIiwgImRlc2NyaXB0aW9uIjogIlJlYWQgYSB0ZXh0IGZpbGUgYW5kIHJldHVybiBsaW5lLW51bWJlcmVkIG91dHB1dC4iLCAicGFyYW1ldGVycyI6IHsidHlwZSI6ICJvYmplY3QiLCAicHJvcGVydGllcyI6IHsiZmlsZV9wYXRoIjogeyJ0eXBlIjogInN0cmluZyJ9LCAiY29tbWFuZCI6IHsidHlwZSI6ICJzdHJpbmcifSwgInF1ZXJpZXMiOiB7InR5cGUiOiAiYXJyYXkiLCAiaXRlbXMiOiB7InR5cGUiOiAic3RyaW5nIn19fSwgInJlcXVpcmVkIjogWyJmaWxlX3BhdGgiXX19fSwgeyJ0eXBlIjogImZ1bmN0aW9uIiwgImZ1bmN0aW9uIjogeyJuYW1lIjogImVkaXQiLCAiZGVzY3JpcHRpb24iOiAiRWRpdCBhbiBleGlzdGluZyB0ZXh0IGZpbGUgYnkgcmVwbGFjaW5nIGxpdGVyYWwgdGV4dC4iLCAicGFyYW1ldGVycyI6IHsidHlwZSI6ICJvYmplY3QiLCAicHJvcGVydGllcyI6IHsiZmlsZV9wYXRoIjogeyJ0eXBlIjogInN0cmluZyJ9LCAiY29tbWFuZCI6IHsidHlwZSI6ICJzdHJpbmcifSwgInF1ZXJpZXMiOiB7InR5cGUiOiAiYXJyYXkiLCAiaXRlbXMiOiB7InR5cGUiOiAic3RyaW5nIn19fSwgInJlcXVpcmVkIjogWyJmaWxlX3BhdGgiXX19fSwgeyJ0eXBlIjogImZ1bmN0aW9uIiwgImZ1bmN0aW9uIjogeyJuYW1lIjogInB3c2giLCAiZGVzY3JpcHRpb24iOiAiRXhlY3V0ZSBhIHNoZWxsIGNvbW1hbmQgYW5kIHJldHVybiBpdHMgb3V0cHV0LiBFYWNoIGNhbGwgcnVucyBpbiBhIGZyZXNoIHByb2Nlc3MuIiwgInBhcmFtZXRlcnMiOiB7InR5cGUiOiAib2JqZWN0IiwgInByb3BlcnRpZXMiOiB7ImZpbGVfcGF0aCI6IHsidHlwZSI6ICJzdHJpbmcifSwgImNvbW1hbmQiOiB7InR5cGUiOiAic3RyaW5nIn0sICJxdWVyaWVzIjogeyJ0eXBlIjogImFycmF5IiwgIml0ZW1zIjogeyJ0eXBlIjogInN0cmluZyJ9fX0sICJyZXF1aXJlZCI6IFsiZmlsZV9wYXRoIl19fX0sIHsidHlwZSI6ICJmdW5jdGlvbiIsICJmdW5jdGlvbiI6IHsibmFtZSI6ICJ3ZWJfc2VhcmNoIiwgImRlc2NyaXB0aW9uIjogIlNlYXJjaCB0aGUgd2ViIGZvciBjdXJyZW50IGluZm9ybWF0aW9uLiBSZXR1cm5zIGFuIG9wdGlvbmFsIHN1bW1hcnkgYW5zd2VyIGFuZCBhIGxpc3Qgb2Ygc291cmNlIFVSTHMuIiwgInBhcmFtZXRlcnMiOiB7InR5cGUiOiAib2JqZWN0IiwgInByb3BlcnRpZXMiOiB7ImZpbGVfcGF0aCI6IHsidHlwZSI6ICJzdHJpbmcifSwgImNvbW1hbmQiOiB7InR5cGUiOiAic3RyaW5nIn0sICJxdWVyaWVzIjogeyJ0eXBlIjogImFycmF5IiwgIml0ZW1zIjogeyJ0eXBlIjogInN0cmluZyJ9fX0sICJyZXF1aXJlZCI6IFsiZmlsZV9wYXRoIl19fX1dfQ==' | base64 -d > B.json
+          wc -c A.json B.json
 
-      - name: Start gateway (verbatim desc mode)
+      - name: Start gateway (verbatim desc)
         run: |
           set +e
           chmod +x bin/zen-direct
@@ -66,7 +40,7 @@ jobs:
           done
           grep -o 'v0\.9\.[0-9]*' gw.log | head -1 | sed 's/^/VER=/' | tee -a $GITHUB_STEP_SUMMARY
 
-      - name: A then B then A again
+      - name: A B A
         run: |
           set +e
           for t in A B A; do
