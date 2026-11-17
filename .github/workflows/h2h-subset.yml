@@ -1,0 +1,44 @@
+name: h2h-subset
+
+# 第三轮：验证「官方工具子集被原样透传」这个缺陷。
+# 假设：zen-direct 的 allOfficialToolNames 对任何官方名子集都返回真，
+#       于是整份 payload 不走改名+脱敏，直接透传；上游看到"自称官方但集合不全"就 429。
+# 预测：官方子集 → zen 429 / o2a 200；混合或纯非官方 → zen 200。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  h2h:
+    name: h2h-${{ matrix.shape }}-${{ matrix.order }}-r${{ matrix.rep }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        shape: [r1_pwsh_clean, r2_official_clean, r2_mixed_clean, r4_official_clean, r13_official_clean, r14_official_clean]
+        order: [zen_first, o2a_first]
+        rep: [1, 2]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: boot gateways
+        run: bash scripts/boot.sh
+
+      - name: measure
+        run: |
+          set -o pipefail
+          bash scripts/h2h.sh "${{ matrix.shape }}" "${{ matrix.order }}" "${{ matrix.rep }}" | tee -a "$GITHUB_STEP_SUMMARY" | tee run/result.txt
+
+      - name: gateway logs
+        if: always()
+        run: |
+          echo "=== o2a.log tail ==="
+          tail -n 20 run/o2a.log 2>/dev/null || true
+          echo "=== zen.log tail ==="
+          tail -n 20 run/zen.log 2>/dev/null || true
