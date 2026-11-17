@@ -29,7 +29,8 @@ jobs:
         run: bash scripts/boot.sh
 
       - name: version
-        run: bash -c 'echo "zen sha: $(sha256sum bin/zen-direct | cut -c1-16)"'
+        run: |
+          echo "zen sha: $(sha256sum bin/zen-direct | cut -c1-16)"
 
       - name: measure
         run: |
