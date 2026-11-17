@@ -1,0 +1,43 @@
+name: h2h-fix
+
+# 第五轮：验证 v0.9.38 的修复（透传条件收紧为"完整官方集"）。
+# 期望：round2/round4 里 zen 0/N 的形态全部转 200；real_dsh / multi45 / r14 不回归。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  h2h:
+    name: h2h-${{ matrix.shape }}-${{ matrix.order }}-r${{ matrix.rep }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      max-parallel: 14
+      matrix:
+        shape: [q1_st_realp, q1_ns_realp, q4_st_realp, rd1_read, real_dsh, r14_official_clean, multi45]
+        order: [zen_first, o2a_first]
+        rep: [1, 2]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: boot gateways
+        run: bash scripts/boot.sh
+
+      - name: version
+        run: bash -c 'echo "zen sha: $(sha256sum bin/zen-direct | cut -c1-16)"'
+
+      - name: measure
+        run: |
+          set -o pipefail
+          bash scripts/h2h.sh "${{ matrix.shape }}" "${{ matrix.order }}" "${{ matrix.rep }}" | tee -a "$GITHUB_STEP_SUMMARY" | tee run/result.txt
+
+      - name: gateway logs
+        if: always()
+        run: |
+          echo "=== zen.log tail ==="
+          tail -n 20 run/zen.log 2>/dev/null || true
